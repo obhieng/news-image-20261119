@@ -1,132 +1,130 @@
-// main.ts — news-image-20261119 entry
+// news-image-20261119 — entry program.
 //
-// This program is the whole entry: it writes the one image that sums up
-// the world news of Thursday 19 November 2026 to the output directory.
+// The entry is one image: entry.png, a front page summing up the world
+// news of Thursday 19 November 2026. This program does not generate the
+// image; it validates the shipped file and copies it to the output
+// directory the grader points at with MAKEFUN_OUTPUT_DIR.
 //
-// The image itself lives in this repository as entry.png (a front page
-// drawn for the day: the Trump–Xi–Putin trilateral summit in Shenzhen,
-// the Gulf war widening to Kuwait, Jeffries' nomination as the first
-// Black Speaker of the U.S. House, the GTA VI launch, Cyclone Akvan,
-// and the rest of the day's stories across six continents). This program
-// does not draw anything and does not use the network; it only checks
-// the image and copies it.
+// Checks performed before anything is written:
+//   1. entry.png exists and is a regular file in this repository.
+//   2. It is at most 1 MiB.
+//   3. It starts with the PNG signature (first 8 bytes).
+//   4. Its IHDR chunk reports width and height, both between 1 and 1024.
+// After writing, the output is read back and compared byte for byte,
+// including a sha256 match, so two runs always produce identical bytes.
 //
-// What it guarantees:
-//   - the file it ships is a real PNG (its first 8 bytes are the PNG
-//     signature), so a truncated or mistyped file is refused loudly
-//   - the file is at most 1 MiB (1048576 bytes), the competition's cap
-//   - the picture is at most 1024 by 1024 pixels, read from its IHDR
-//     chunk, the competition's other cap
-//   - the output is byte-for-byte the input, so running the program
-//     twice writes the same bytes twice (the competition runs it twice
-//     and both runs must write the same bytes)
-//
-// The output directory comes from MAKEFUN_OUTPUT_DIR and defaults to
-// ./out. The program only uses the Node standard library.
+// Only the Node standard library is used. No network access.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The image this entry ships, at the root of this repository.
-const ENTRY_NAME = "entry.png";
+const IMAGE_FILE = "entry.png";
+const MAX_FILE_BYTES = 1 << 20; // 1 MiB
+const MAX_SIDE_PX = 1024;
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-// The competition's limits for the image file.
-const MAX_BYTES = 1048576; // 1 MiB
-const MAX_DIMENSION = 1024; // pixels on either side
-
-// The eight bytes every PNG file starts with.
-const PNG_SIGNATURE = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-]);
-
-// Stop with a clear message instead of writing a bad entry.
-function fail(message: string): never {
-  throw new Error(`entry refused: ${message}`);
+// Abort with a message the grader log can show plainly.
+function refuse(reason: string): never {
+  throw new Error(`refused to ship entry: ${reason}`);
 }
 
-// The directory this file lives in is the repository root, whatever the
-// working directory the program is started from.
-function repoRoot(): string {
+function sha256Hex(data: Buffer): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+// Repository root: the folder holding this script, wherever the caller
+// started the process from.
+function rootDir(): string {
   return dirname(fileURLToPath(import.meta.url));
 }
 
-// The directory the image goes to. The grader sets MAKEFUN_OUTPUT_DIR;
-// running by hand without it writes to ./out next to the repository.
-function outputDir(): string {
-  const fromEnv = process.env.MAKEFUN_OUTPUT_DIR;
-  if (fromEnv !== undefined && fromEnv.length > 0) {
-    return fromEnv;
-  }
-  return "out";
+// Where the image must land. The grader sets MAKEFUN_OUTPUT_DIR; by
+// hand it falls back to ./out relative to the current directory.
+function targetDir(): string {
+  const env = process.env.MAKEFUN_OUTPUT_DIR;
+  return env && env.trim().length > 0 ? env : "out";
 }
 
-// Read the IHDR chunk (the first chunk of a PNG) and return the picture's
-// width and height in pixels. A PNG shorter than the IHDR is not whole.
-function pngDimensions(bytes: Buffer): { width: number; height: number } {
-  // 8 signature bytes + 4 length + 4 chunk type + 13 IHDR data bytes.
-  const minimumLength = 8 + 4 + 4 + 13;
-  if (bytes.length < minimumLength) {
-    fail("file is too short to hold a PNG header");
+// Read width and height out of the IHDR chunk. The layout is fixed:
+// 8 magic bytes, 4 length bytes, 4 chunk-type bytes ("IHDR"), then
+// 4 bytes width and 4 bytes height, big-endian.
+function readPngSize(data: Buffer): { width: number; height: number } {
+  const headerBytes = 8 + 4 + 4 + 13;
+  if (data.length < headerBytes) {
+    refuse("file is shorter than a PNG header");
   }
-  const chunkType = bytes.subarray(12, 16).toString("ascii");
-  if (chunkType !== "IHDR") {
-    fail("first chunk is not IHDR, so this is not a whole PNG");
+  if (data.subarray(12, 16).toString("latin1") !== "IHDR") {
+    refuse("first PNG chunk is not IHDR");
   }
-  const width = bytes.readUInt32BE(16);
-  const height = bytes.readUInt32BE(20);
-  return { width, height };
+  return {
+    width: data.readUInt32BE(16),
+    height: data.readUInt32BE(20),
+  };
 }
 
-function main(): void {
-  const root = repoRoot();
-  const inputPath = join(root, ENTRY_NAME);
+function run(): void {
+  const source = join(rootDir(), IMAGE_FILE);
 
-  if (!existsSync(inputPath)) {
-    fail(`${ENTRY_NAME} is missing from the repository`);
+  let info;
+  try {
+    info = statSync(source);
+  } catch {
+    refuse(`${IMAGE_FILE} is missing from the repository`);
   }
-  if (!statSync(inputPath).isFile()) {
-    fail(`${ENTRY_NAME} is not a regular file`);
-  }
-
-  const bytes = readFileSync(inputPath);
-
-  if (bytes.length > MAX_BYTES) {
-    fail(`${ENTRY_NAME} is ${bytes.length} bytes, over the ${MAX_BYTES} cap`);
-  }
-  if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    fail(`${ENTRY_NAME} does not start with the PNG signature`);
+  if (!info.isFile()) {
+    refuse(`${IMAGE_FILE} is not a regular file`);
   }
 
-  const { width, height } = pngDimensions(bytes);
-  if (width === 0 || height === 0) {
-    fail(`picture has a zero dimension (${width}x${height})`);
+  const bytes = readFileSync(source);
+
+  if (bytes.length > MAX_FILE_BYTES) {
+    refuse(
+      `${IMAGE_FILE} is ${bytes.length} bytes, above the ${MAX_FILE_BYTES}-byte limit`,
+    );
   }
-  if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-    fail(`picture is ${width}x${height}, over the ${MAX_DIMENSION} cap`);
+  const magic = PNG_MAGIC.every((byte, i) => bytes[i] === byte);
+  if (!magic) {
+    refuse(`${IMAGE_FILE} does not begin with the PNG signature`);
   }
 
-  const dir = outputDir();
-  mkdirSync(dir, { recursive: true });
-  const outputPath = join(dir, ENTRY_NAME);
-  writeFileSync(outputPath, bytes);
-
-  // Read the file back and prove the copy is exact: the bytes written
-  // must be the bytes read, and the two sha256 hashes must agree. This
-  // is what the competition checks when it runs the program twice.
-  const written = readFileSync(outputPath);
-  if (!written.equals(bytes)) {
-    fail("bytes read back differ from the bytes copied in");
+  const { width, height } = readPngSize(bytes);
+  if (width < 1 || height < 1) {
+    refuse(`image has an impossible size of ${width}x${height}`);
   }
-  const hash = (data: Buffer): string =>
-    createHash("sha256").update(data).digest("hex");
-  if (hash(written) !== hash(bytes)) {
-    fail("sha256 of the output differs from sha256 of the input");
+  if (width > MAX_SIDE_PX || height > MAX_SIDE_PX) {
+    refuse(
+      `image is ${width}x${height}, larger than the ${MAX_SIDE_PX}x${MAX_SIDE_PX} limit`,
+    );
+  }
+  // A whole PNG ends with the 12-byte IEND chunk (length 0, "IEND",
+  // CRC). A file missing it was cut off mid-write, even if the header
+  // and the size limit both look fine.
+  const tail = bytes.subarray(bytes.length - 12);
+  const endsWithIend =
+    tail.readUInt32BE(0) === 0 && tail.subarray(4, 8).toString("latin1") === "IEND";
+  if (!endsWithIend) {
+    refuse("file does not end with the IEND chunk — it looks truncated");
   }
 
-  console.log(`wrote ${outputPath}: ${bytes.length} bytes, ${width}x${height}`);
-  console.log(`sha256 ${hash(bytes)}`);
+  const destination = resolve(targetDir(), IMAGE_FILE);
+  mkdirSync(dirname(destination), { recursive: true });
+  writeFileSync(destination, bytes);
+
+  // Prove the copy is exact before reporting success.
+  const roundTrip = readFileSync(destination);
+  if (!roundTrip.equals(bytes)) {
+    refuse("output read back does not match the input bytes");
+  }
+  const digest = sha256Hex(bytes);
+  if (sha256Hex(roundTrip) !== digest) {
+    refuse("output sha256 does not match the input sha256");
+  }
+
+  console.log(`wrote ${destination}`);
+  console.log(`size ${bytes.length} bytes, dimensions ${width}x${height}`);
+  console.log(`sha256 ${digest}`);
 }
 
-main();
+run();
